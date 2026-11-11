@@ -3,9 +3,9 @@
 **One ordinary video of an indoor space becomes a photorealistic 3D room you can walk through in a web browser.**
 Team ruakpeedkahem (rpk): Akarsh Shrivastav, Mayan S Hiremath, NIT Goa · Techfest 2026-27, IIT Bombay.
 
-- **Live walkthrough:** https://namma-space-7ny.pages.dev/ (open **Walking setup > Enter saved walking setup**,
-  then WASD to move and drag to look; best on a desktop browser using its dedicated GPU). Mirror:
-  https://thecodenottakent-t.github.io/namma-space/ (slower to load from India)
+- **Live app:** https://namma-space-7ny.pages.dev/ opens straight into the room: WASD to walk, drag to look,
+  `/` to search, `M` for the bird's-eye view. Best in a desktop browser using its dedicated GPU.
+  The Round 1 version stays at https://round1.namma-space-7ny.pages.dev/
 - **Capture SOP:** [docs/CAPTURE_SOP.md](docs/CAPTURE_SOP.md)
 - **Sample data:** [tests/sample/](tests/sample/) (30 s of our classroom capture)
 
@@ -19,6 +19,21 @@ video ──> keyframes ──> camera poses ──> depth/normal priors ──>
                                                               v
                        viewer/: import ──> browser viewer (Aholo) with first-person walking ──> static website
 ```
+
+## Round 2: places, search and navigation
+
+- **Tag places and zones** in the browser: click a spot in the room, or click the corners of a floor area.
+  Places are stored in `venue.json` next to the scene, in the scene's own coordinates.
+- **Instant search** that forgives typos and understands other words ("toilet", "where can I sit",
+  "nearest exit"), ranked by walking distance.
+- **Click any label or zone** to see its name, distance and walking time.
+- **Obstacle-aware walking routes** on a navigation mesh built from the reconstruction, drawn on the floor
+  with turn-by-turn directions that update as you walk, and an optional guided walk.
+- **Visits with several stops**, ordered by an exact shortest-route solver.
+- **Bird's-eye view** of the real scan with the ceiling cut away, a heading-up radar, voice search and spoken
+  directions.
+
+Details, module map and tests: [viewer/README.md](viewer/README.md).
 
 ## Repository layout
 
