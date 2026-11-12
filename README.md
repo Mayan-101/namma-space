@@ -86,9 +86,27 @@ image quality.
 
 ## Settings that matter
 
-Defaults (`namma/config.py`) are the ones that produced the Round 1 room. Two more are implemented but have not
-run on a GPU yet: `train.strategy = "default"` (original 3DGS densification, grows past 1M Gaussians) and
-`priors.image_long_side = 3840` (4K training images from 4K video).
+Defaults (`namma/config.py`) are the ones that produced the Round 1 room. Options:
+
+- `train.ppisp = true`: NVIDIA PPISP models each frame's exposure, vignetting, colour and camera response
+  during training instead of a simple per-frame colour fix (setup compiles it; see below).
+- `train.strategy = "default"`: original 3DGS densification, grows past 1M Gaussians.
+- `priors.image_long_side = 3840`: 4K training images from 4K video (not yet run on a GPU).
+
+Every training run reports two scores on held-out photos: **PSNR** of the plain render, which is what the
+web viewer shows, and **colour-matched PSNR** after the best colour map onto the photo, which ignores
+exposure differences and measures detail and geometry.
+
+## Compare settings on a finished room
+
+[`notebooks/quality_experiment.py`](notebooks/quality_experiment.py) retrains a finished room under several
+settings on its saved frames, camera solve and depth priors, and renders held-out photos from every result
+side by side (`python -m namma.experiment`, `python -m namma compare`). Each result is also a room you can
+import into the viewer. Its **0. Quick GPU test** button (`python -m namma.experiment selftest`, about 15
+minutes) first runs `tests/run_local_experiment.py` on the bundled clip on the cloud GPU: two tiny rooms,
+one killed and resumed, and a report, with a local folder standing in for Drive. On a laptop that cannot
+compile gsplat, `--small` runs the same test with the stand-in renderer `tests/fake_gsplat.py`, so it checks
+PPISP and the experiment flow but not gsplat.
 
 ## Licences
 
