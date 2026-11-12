@@ -22,7 +22,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # Every check is required: setup passes only when all of them pass.
-CHECKS = ("environment", "torch_cuda", "gsplat", "pipeline_imports", "open3d_tsdf")
+CHECKS = ("environment", "torch_cuda", "gsplat", "ppisp", "pipeline_imports", "open3d_tsdf")
 
 
 class CheckFailed(AssertionError):
@@ -184,6 +184,34 @@ def check_gsplat():
     assert (new_scales > 0).all() and ((new_opac > 0) & (new_opac <= 1)).all(), "relocation out of range"
     return {"binary": binary, "version": gsplat.__version__, "coverage": coverage, "grad_norms": grads,
             "relocation_min_scale_ratio": float((new_scales / scales).min())}
+
+
+def check_ppisp():
+    """PPISP (optional colour model, train.ppisp): forward, backward and the regulariser on the GPU.
+    Passes with installed=False when the package is absent; only PPISP experiments need it."""
+    import importlib.util
+    if importlib.util.find_spec("ppisp") is None:
+        return {"installed": False}
+    import torch
+    import ppisp
+    from ppisp import PPISP, PPISPConfig
+    binary = _assert_outside_source(importlib.util.find_spec("ppisp_cuda").origin, "ppisp")
+    torch.manual_seed(0)
+    isp = PPISP(num_cameras=1, num_frames=3, config=PPISPConfig()).cuda()
+    # Set up as the trainer does: without schedulers PPISP treats itself as trained (inference mode),
+    # predicts every correction with its controller and detaches the input, so no gradient reaches rgb.
+    isp.create_schedulers(isp.create_optimizers(), max_optimization_iters=100)
+    height, width = 48, 64
+    y, x = torch.meshgrid(torch.arange(height, device="cuda") + 0.5, torch.arange(width, device="cuda") + 0.5, indexing="ij")
+    rgb = torch.rand(height, width, 3, device="cuda", requires_grad=True)
+    out = isp(rgb=rgb, pixel_coords=torch.stack([x, y], -1), resolution=(width, height), camera_idx=0, frame_idx=1)
+    assert out.shape == rgb.shape and torch.isfinite(out).all(), "non-finite PPISP output"
+    (out.mean() + isp.get_regularization_loss()).backward()
+    assert rgb.grad is not None and torch.isfinite(rgb.grad).all() and float(rgb.grad.abs().sum()) > 0, "bad PPISP gradient"
+    novel = isp(rgb=rgb.detach(), pixel_coords=torch.stack([x, y], -1), resolution=(width, height), camera_idx=0, frame_idx=None)
+    assert torch.isfinite(novel).all(), "non-finite PPISP output for a new view"
+    return {"installed": True, "version": ppisp.__version__, "binary": binary,
+            "identity_error": float((out.detach() - rgb.detach()).abs().mean())}
 
 
 def check_pipeline_imports():

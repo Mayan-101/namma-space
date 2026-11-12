@@ -49,6 +49,11 @@ class PriorsConfig:
     prior_long_side: int = 1920  # MoGe maps are stored at this size; training upsamples them
 
 
+# Settings added after jobs already existed. A stage's hash leaves them out while they are at these defaults,
+# so jobs finished before the option existed are not re-run just because the code gained it.
+LATER_DEFAULTS = {("train", "ppisp"): False}
+
+
 # Per-strategy values of the TrainConfig fields left at None (gsplat simple_trainer's defaults and its mcmc preset).
 STRATEGY_DEFAULTS = {"default": {"init_opacity": 0.1, "init_scale": 1.0, "opacity_reg": 0.0, "scale_reg": 0.0},
                      "mcmc": {"init_opacity": 0.5, "init_scale": 0.1, "opacity_reg": 0.01, "scale_reg": 0.01}}
@@ -72,6 +77,7 @@ class TrainConfig:
     normal_lambda: float = 0.05  # 1 - cos against prior normals, from normal_start
     normal_start: int = 3000
     appearance: bool = True      # per-image affine colour correction (exposure / white balance)
+    ppisp: bool = False          # NVIDIA PPISP instead: exposure, vignetting, colour and response curve per frame (needs the ppisp package)
     test_every: int = 24         # every Nth frame is held out for evaluation
     checkpoint_every: int = 2500
     preview_every: int = 2500
@@ -121,7 +127,14 @@ class Config:
 
     def stage_hash(self, *sections):
         """Hash of the settings a stage depends on; a change re-runs that stage."""
-        blob = json.dumps({s: dataclasses.asdict(getattr(self, s)) for s in sections}, sort_keys=True)
+        data = {}
+        for section in sections:
+            values = dataclasses.asdict(getattr(self, section))
+            for (owner, key), default in LATER_DEFAULTS.items():
+                if owner == section and values.get(key) == default:
+                    del values[key]
+            data[section] = values
+        blob = json.dumps(data, sort_keys=True)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 

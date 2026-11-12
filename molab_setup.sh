@@ -23,6 +23,9 @@ GSPLAT_DIR=/opt/namma-src/gsplat              # outside /marimo: a molab restart
 CACHE_DIR=/opt/namma-cache                    # compiled gsplat by build signature; the notebook syncs it with Drive
 # Published compiled builds: <base>/gsplat-<signature>.tar + .tar.sha256 (GitHub release assets).
 PREBUILT_BASE="${NAMMA_PREBUILT_BASE:-https://github.com/TheCodeNotTakenT-T/namma-space/releases/download/gsplat-prebuilt}"
+PPISP_URL=https://github.com/nv-tlabs/ppisp.git
+PPISP_COMMIT=a247368047651db2e03e6f97a36e4f5bebbe5c5f    # nv-tlabs/ppisp (Apache-2.0), 23 Sep 2026: optional colour model
+PPISP_DIR=/opt/namma-src/ppisp
 MOGE_COMMIT=74fbce054ebed49800de42d0ad0e83495065719a     # microsoft/MoGe (MIT), MoGe-2 model used
 UTILS3D_COMMIT=62f09d58509485564e24d5d9f6aac9ee9ebc0c37  # pinned by MoGe's pyproject
 VENV="${NAMMA_VENV:-$REPO_ROOT/.venv}"
@@ -186,6 +189,17 @@ fetch_gsplat() {
     git -C "$dir" diff --stat
 }
 
+fetch_ppisp() {  # scratch copy of the pinned upstream source, like gsplat's
+    if [[ "$(git -C "$PPISP_DIR" rev-parse HEAD 2>/dev/null)" != "$PPISP_COMMIT" ]]; then
+        rm -rf "$PPISP_DIR"
+        mkdir -p "$PPISP_DIR"
+        git -C "$PPISP_DIR" init -q
+        git -C "$PPISP_DIR" fetch -q --depth 1 "$PPISP_URL" "$PPISP_COMMIT"
+        git -C "$PPISP_DIR" checkout -q --detach FETCH_HEAD
+    fi
+    git -C "$PPISP_DIR" log -1 --format='ppisp %H %cd'
+}
+
 install_moge() {  # pure Python; --no-deps keeps NumPy 1.26.4 (MoGe 3.0's pyproject asks for numpy>=2)
     local stamp="$VENV/.namma-builds/moge" want="$MOGE_COMMIT $UTILS3D_COMMIT"
     if [[ -f "$stamp" && "$(cat "$stamp")" == "$want" ]] && "$VENV_PY" -c "import moge.model.v2, utils3d_moge" 2>/dev/null; then
@@ -243,7 +257,7 @@ build_one() {  # build_one <name> <path> <required:1|0>
     if [[ $REBUILD == 0 && -f "$stamps/$name" && "$(cat "$stamps/$name")" == "$sig" ]]; then
         echo "$name: cached build matches toolchain and sources."
         printf 'build:%s\tcached\n' "$name" >> "$TIMINGS"
-        [[ $name != gsplat ]] || save_cache gsplat "$sig"
+        save_cache "$name" "$sig"
         return
     fi
     if [[ $REBUILD == 0 && $name == gsplat && ! -f "$CACHE_DIR/$name-$sig.tar" ]]; then
@@ -263,7 +277,7 @@ build_one() {  # build_one <name> <path> <required:1|0>
             > "$LOG_DIR/build-$name.log" 2>&1; then
         echo "$sig" > "$stamps/$name"
         printf 'build:%s\t%s\n' "$name" "$((SECONDS - started))" >> "$TIMINGS"
-        [[ $name != gsplat ]] || save_cache gsplat "$sig"
+        save_cache "$name" "$sig"
     else
         printf 'build:%s\tfailed\n' "$name" >> "$TIMINGS"
         tail -n 40 "$LOG_DIR/build-$name.log"
@@ -276,6 +290,7 @@ build_one() {  # build_one <name> <path> <required:1|0>
 
 build_extensions() {
     build_one gsplat "$GSPLAT_DIR" 1
+    build_one ppisp "$PPISP_DIR" 0   # optional: only train.ppisp needs it
     uv pip freeze --python "$VENV_PY" > "$LOG_DIR/pip-freeze-after-build.txt"
 }
 
@@ -291,6 +306,7 @@ fi
 step cuda-environment cuda_environment
 if [[ $MODE == full ]]; then
     step gsplat-source fetch_gsplat
+    step ppisp-source fetch_ppisp
     step extensions build_extensions
     step moge install_moge
 fi
