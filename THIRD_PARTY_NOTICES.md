@@ -32,5 +32,4 @@ PlayCanvas splat-transform and Vite, all MIT.
 NeurIPS 2024); MoGe-2 (Wang et al., 2025); Structure-from-Motion Revisited (Schönberger and Frahm, CVPR 2016);
 KinectFusion-style TSDF fusion (Newcombe et al., 2011).
 
-An earlier prototype of this project used PlanarGS (Mayan-101/NammaPlanarGS); that code is not part of this
-repository.
+
