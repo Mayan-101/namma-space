@@ -3,8 +3,7 @@
 Follows gsplat's examples/simple_trainer.py recipe (MCMC densification with a fixed Gaussian budget,
 L1 + SSIM, opacity/scale regularisation, SH degree warm-up) and adds:
   * per-frame affine colour correction for video exposure / white-balance drift (training only; the
-    exported model keeps the uncorrected colours), or optionally NVIDIA PPISP (Apache-2.0): exposure,
-    vignetting, colour and camera response per frame, with a controller that predicts them for new views,
+    exported model keeps the uncorrected colours),
   * log-depth and normal-consistency losses against the aligned MoGe priors (namma.priors),
   * non-finite loss/gradient guards and full-state checkpoints for resuming after a Molab shutdown.
 """
@@ -25,7 +24,6 @@ from namma.sfm import cam_from_world
 from namma.workspace import sha256_file, write_json
 
 SH_C0 = 0.28209479177387814
-PPISP_CONTROLLER_START = 25_000 / 30_000  # gsplat simple_trainer: the last sixth trains PPISP's controller, Gaussians frozen
 OUTLIER_FACTOR = 6.0  # same rule as namma.sfm.outlier_cameras
 BACKEND = None  # tests may install a stand-in renderer here
 
@@ -155,7 +153,7 @@ def render(splats, frame, sh_degree, device, mode="RGB+ED"):
         means=splats["means"], quats=splats["quats"], scales=torch.exp(splats["scales"]),
         opacities=torch.sigmoid(splats["opacities"]), colors=colors, viewmats=viewmat, Ks=frame.K.to(device)[None],
         width=frame.width, height=frame.height, sh_degree=sh_degree, render_mode=mode, packed=False,
-        rasterize_mode="classic")
+        rasterize_mode="antialiased")  # audit §7.4: removes stair-case fringes at hole edges / shimmer in motion
     return renders, alphas, info
 
 
@@ -173,20 +171,6 @@ def lambda_at(step, steps, start, end):
 
 def ssim_value(a, b):
     return 1.0 - float(backend().ssim_loss(a.permute(0, 3, 1, 2), b.permute(0, 3, 1, 2)))
-
-
-def color_matched(rgb, gt):
-    """The render after the best affine colour map onto the photo (least squares, like gsplat's cc_psnr).
-    It removes exposure and white-balance differences, so what is left is detail and geometry error."""
-    x = rgb.reshape(-1, 3).double()
-    X = torch.cat([x, torch.ones_like(x[:, :1])], 1)
-    y = gt.reshape(-1, 3).double()
-    W = torch.linalg.solve(X.T @ X + 1e-6 * torch.eye(4, dtype=X.dtype, device=X.device), X.T @ y)
-    return (X @ W).float().clamp(0, 1).reshape(rgb.shape)
-
-
-def psnr_value(a, b):
-    return float(-10 * torch.log10(F.mse_loss(a, b).clamp_min(1e-10)))
 
 
 class Trainer:
@@ -210,12 +194,6 @@ class Trainer:
         self.app_A = torch.nn.Parameter(torch.eye(3, device=device).repeat(n, 1, 1))
         self.app_b = torch.nn.Parameter(torch.zeros(n, 3, device=device))
         self.app_opt = torch.optim.Adam([self.app_A, self.app_b], lr=1e-3)
-        self.isp, self.isp_opts, self.isp_scheds, self.frozen, self._pixel_cache = None, [], [], False, {}
-        if self.tc.ppisp:
-            from ppisp import PPISP, PPISPConfig
-            self.isp = PPISP(num_cameras=1, num_frames=n, config=PPISPConfig(controller_activation_ratio=PPISP_CONTROLLER_START)).to(device)
-            self.isp_opts = self.isp.create_optimizers()
-            self.isp_scheds = self.isp.create_schedulers(self.isp_opts, max_optimization_iters=self.tc.steps)
         start = min(500, self.tc.steps // 10)
         if self.tc.strategy == "mcmc":
             self.strategy = backend().MCMCStrategy(cap_max=self.tc.cap_max, refine_stop_iter=int(self.tc.steps * 0.83),
@@ -242,8 +220,6 @@ class Trainer:
                  "optimizers": {k: o.state_dict() for k, o in self.optimizers.items()},
                  "scheduler": self.scheduler.state_dict(), "strategy_state": self.strategy_state,
                  "app": {"A": self.app_A.detach().cpu(), "b": self.app_b.detach().cpu(), "opt": self.app_opt.state_dict()},
-                 "isp": None if self.isp is None else {"model": self.isp.state_dict(), "opts": [o.state_dict() for o in self.isp_opts],
-                                                       "scheds": [s.state_dict() for s in self.isp_scheds]},
                  "order": self.order, "cursor": self.cursor, "rng": self.rng.bit_generator.state,
                  "torch_rng": torch.get_rng_state(), "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                  "frames": [f.name for f in self.frames], "settings": self.settings}
@@ -276,12 +252,6 @@ class Trainer:
                 self.app_A.copy_(state["app"]["A"])
                 self.app_b.copy_(state["app"]["b"])
             self.app_opt.load_state_dict(state["app"]["opt"])
-            if self.isp is not None:
-                self.isp.load_state_dict(state["isp"]["model"])
-                for opt, saved in zip(self.isp_opts, state["isp"]["opts"]):
-                    opt.load_state_dict(saved)
-                for sched, saved in zip(self.isp_scheds, state["isp"]["scheds"]):
-                    sched.load_state_dict(saved)
             self.order, self.cursor = state["order"], state["cursor"]
             self.rng.bit_generator.state = state["rng"]
             torch.set_rng_state(state["torch_rng"])
@@ -301,45 +271,23 @@ class Trainer:
         self.cursor += 1
         return index
 
-    def _pixels(self, frame):
-        """Pixel centres [H, W, 2] for PPISP's vignetting."""
-        key = (frame.width, frame.height)
-        if key not in self._pixel_cache:
-            y, x = torch.meshgrid(torch.arange(frame.height, device=self.device) + 0.5,
-                                  torch.arange(frame.width, device=self.device) + 0.5, indexing="ij")
-            self._pixel_cache[key] = torch.stack([x, y], dim=-1)
-        return self._pixel_cache[key]
-
-    def apply_isp(self, rgb, frame, index=None):
-        """PPISP on a [1, H, W, 3] render: a training frame's own corrections, or (index None) the controller's prediction."""
-        return self.isp(rgb=rgb[0], pixel_coords=self._pixels(frame), resolution=(frame.width, frame.height),
-                        camera_idx=0, frame_idx=index)[None]
-
     def train_step(self):
         tc, step = self.tc, self.step
-        if self.isp is not None and not self.frozen and step >= int(PPISP_CONTROLLER_START * tc.steps):
-            # Only PPISP's controller learns from here on (it learns to predict corrections for new views).
-            for p in self.splats.values():
-                p.requires_grad_(False)
-            self.frozen = True
-            self.ws.log(f"step {step}: Gaussians frozen; PPISP controller distillation")
         index = self._next_frame()
         frame = self.frames[index]
         gt = frame.image.to(self.device, non_blocking=True).float()[None] / 255.0
         sh_degree = min(step // tc.sh_degree_interval, tc.sh_degree)
         renders, alphas, info = render(self.splats, frame, sh_degree, self.device)
-        if self.tc.strategy != "mcmc" and not self.frozen:  # frozen Gaussians have no gradients to record
+        if self.tc.strategy != "mcmc":
             self.strategy.step_pre_backward(self.splats, self.optimizers, self.strategy_state, step, info)
         rgb, depth = renders[..., :3], renders[..., 3:4]
-        if self.isp is not None:
-            rgb = self.apply_isp(rgb, frame, index)
-        elif tc.appearance and step >= 1000:
+        if tc.appearance and step >= 1000:
             rgb = torch.einsum("bhwc,dc->bhwd", rgb, self.app_A[index]) + self.app_b[index]
         rgb_c = rgb.clamp(0, 1)
         l1 = (rgb - gt).abs().mean()
         loss = (1 - tc.ssim_lambda) * l1 + tc.ssim_lambda * backend().ssim_loss(rgb_c.permute(0, 3, 1, 2), gt.permute(0, 3, 1, 2))
         terms = {"l1": l1.item()}
-        if frame.depth is not None and not self.frozen:
+        if frame.depth is not None:
             prior = _fit(frame.depth.to(self.device).float()[..., None], frame)[None]
             valid = (prior > 0) & (depth > 1e-4) & (alphas > 0.5)
             if valid.sum() > 100:
@@ -361,13 +309,11 @@ class Trainer:
                     normal_loss = (1 - cos[valid_n]).mean()
                     loss = loss + tc.normal_lambda * normal_loss
                     terms["normal"] = normal_loss.item()
-        if tc.value("opacity_reg") and not self.frozen:
+        if tc.value("opacity_reg"):
             loss = loss + tc.value("opacity_reg") * torch.sigmoid(self.splats["opacities"]).mean()
-        if tc.value("scale_reg") and not self.frozen:
+        if tc.value("scale_reg"):
             loss = loss + tc.value("scale_reg") * torch.exp(self.splats["scales"]).mean()
-        if self.isp is not None:
-            loss = loss + self.isp.get_regularization_loss()
-        elif tc.appearance and step >= 1000:
+        if tc.appearance and step >= 1000:
             loss = loss + 1e-2 * ((self.app_A[index] - torch.eye(3, device=self.device)).square().mean() + self.app_b[index].square().mean())
 
         if not torch.isfinite(loss):
@@ -376,23 +322,14 @@ class Trainer:
         bad = [k for k, p in self.splats.items() if p.grad is not None and not torch.isfinite(p.grad).all()]
         if bad:
             return self._skip(f"non-finite gradients in {bad}")
-        if not self.frozen:
-            for opt in self.optimizers.values():
-                opt.step()
-                opt.zero_grad(set_to_none=True)
-        if self.isp is not None:
-            for opt in self.isp_opts:
-                opt.step()
-                opt.zero_grad(set_to_none=True)
-            for sched in self.isp_scheds:
-                sched.step()
-        elif tc.appearance and step >= 1000:
+        for opt in self.optimizers.values():
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        if tc.appearance and step >= 1000:
             self.app_opt.step()
         self.app_opt.zero_grad(set_to_none=True)
         self.scheduler.step()
-        if self.frozen:
-            pass  # no densification, relocation or noise on frozen Gaussians
-        elif tc.strategy == "mcmc":
+        if tc.strategy == "mcmc":
             self.strategy.step_post_backward(self.splats, self.optimizers, self.strategy_state, step, info,
                                              lr=self.scheduler.get_last_lr()[0])
         else:
@@ -407,7 +344,7 @@ class Trainer:
         return terms
 
     def _skip(self, reason):
-        for opt in list(self.optimizers.values()) + [self.app_opt] + list(self.isp_opts):
+        for opt in list(self.optimizers.values()) + [self.app_opt]:
             opt.zero_grad(set_to_none=True)
         self.bad_steps += 1
         self.ws.log(f"step {self.step}: skipped, {reason}")
@@ -419,27 +356,16 @@ class Trainer:
     # ---- evaluation / previews ------------------------------------------------------------------
     @torch.no_grad()
     def evaluate(self):
-        """Scores on held-out frames. psnr/ssim compare the plain render, which is what the web viewer shows;
-        cc_psnr/cc_ssim compare it after the best colour map onto the photo, so exposure differences between
-        frames do not count; isp_psnr (PPISP runs) applies the colour corrections PPISP predicts for a new view."""
         ids = self.test_ids or self.train_ids[:: max(1, len(self.train_ids) // 20)]
-        scores = {key: [] for key in ("psnr", "ssim", "cc_psnr", "cc_ssim", "isp_psnr")}
+        psnr, ssim = [], []
         for i in ids:
             frame = self.frames[i]
             renders, _, _ = render(self.splats, frame, self.tc.sh_degree, self.device, mode="RGB")
-            raw = renders[..., :3]
-            rgb = raw.clamp(0, 1)
+            rgb = renders[..., :3].clamp(0, 1)
             gt = frame.image.to(self.device).float()[None] / 255.0
-            scores["psnr"].append(psnr_value(rgb, gt))
-            scores["ssim"].append(ssim_value(rgb, gt))
-            matched = color_matched(rgb, gt)
-            scores["cc_psnr"].append(psnr_value(matched, gt))
-            scores["cc_ssim"].append(ssim_value(matched, gt))
-            if self.isp is not None:
-                scores["isp_psnr"].append(psnr_value(self.apply_isp(raw, frame).clamp(0, 1), gt))
-        result = {"views": len(ids), "held_out": bool(self.test_ids)}
-        result.update({key: float(np.mean(values)) for key, values in scores.items() if values})
-        return result
+            psnr.append(float(-10 * torch.log10(F.mse_loss(rgb, gt).clamp_min(1e-10))))
+            ssim.append(ssim_value(rgb, gt))
+        return {"views": len(ids), "held_out": bool(self.test_ids), "psnr": float(np.mean(psnr)), "ssim": float(np.mean(ssim))}
 
     @torch.no_grad()
     def preview(self):
@@ -509,7 +435,7 @@ def run(ws, cfg, on_checkpoint=None):
             if on_checkpoint:
                 on_checkpoint(path, step)
             score = trainer.evaluate()
-            history.append({"step": step, "psnr": round(score["psnr"], 2), "ssim": round(score["ssim"], 4), "cc_psnr": round(score["cc_psnr"], 2)})
+            history.append({"step": step, "psnr": round(score["psnr"], 2), "ssim": round(score["ssim"], 4)})
             with open(log_path, "a") as f:
                 f.write(__import__("json").dumps({"eval": history[-1]}) + "\n")
             if best is None or score["psnr"] > best[0]:
@@ -527,7 +453,6 @@ def run(ws, cfg, on_checkpoint=None):
         raise RuntimeError(f"Training did not converge (held-out PSNR {metrics['psnr']:.1f} dB, scene scale "
                            f"{trainer.scale:.3g}). Check the camera reconstruction (outlier cameras, pose error).")
     metrics.update(gaussians=len(trainer.splats["means"]), steps=tc.steps, minutes=round((time.time() - started) / 60, 1),
-                   priors=trainer.has_priors, scene_scale=trainer.scale, world_scale=trainer.norm, eval_history=history,
-                   colour_model="ppisp" if tc.ppisp else "affine" if tc.appearance else "none")
+                   priors=trainer.has_priors, scene_scale=trainer.scale, world_scale=trainer.norm, eval_history=history)
     write_json(ws.train / "eval.json", metrics)
     return metrics, [final, ws.train / "eval.json", log_path]

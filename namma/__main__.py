@@ -4,7 +4,6 @@
     python -m namma prepare --video V --jobs-root DIR       # create the job (and its smoke test) for a video
     python -m namma run --job DIR [--until STAGE]           # run or resume every stage
     python -m namma status --job DIR                        # print the job's status.json
-    python -m namma compare --jobs A B --names a b --out DIR # held-out renders of trained rooms side by side
 Drive backup/restore runs with the notebook's Python: python -m namma.backup --help
 """
 import argparse
@@ -32,12 +31,6 @@ def main(argv=None):
     status = commands.add_parser("status", help="Show a job's status")
     status.add_argument("--job", required=True)
 
-    if argv is None:
-        argv = sys.argv[1:]
-    if argv[:1] == ["compare"]:  # its own options (namma.compare)
-        from namma import compare
-        return compare.main(argv[1:])
-    commands.add_parser("compare", help="Render trained rooms that share a camera solve side by side")
     args = parser.parse_args(argv)
     if args.command == "check":
         from namma import gpu_check

@@ -49,11 +49,6 @@ class PriorsConfig:
     prior_long_side: int = 1920  # MoGe maps are stored at this size; training upsamples them
 
 
-# Settings added after jobs already existed. A stage's hash leaves them out while they are at these defaults,
-# so jobs finished before the option existed are not re-run just because the code gained it.
-LATER_DEFAULTS = {("train", "ppisp"): False}
-
-
 # Per-strategy values of the TrainConfig fields left at None (gsplat simple_trainer's defaults and its mcmc preset).
 STRATEGY_DEFAULTS = {"default": {"init_opacity": 0.1, "init_scale": 1.0, "opacity_reg": 0.0, "scale_reg": 0.0},
                      "mcmc": {"init_opacity": 0.5, "init_scale": 0.1, "opacity_reg": 0.01, "scale_reg": 0.01}}
@@ -61,7 +56,7 @@ STRATEGY_DEFAULTS = {"default": {"init_opacity": 0.1, "init_scale": 1.0, "opacit
 
 @dataclass
 class TrainConfig:
-    steps: int = 30_000
+    steps: int = 60_000     # raised from 30k: 20.7 dB Round 1 was under-trained (audit §7.2 C3, §7.3)
     strategy: str = "mcmc"       # "mcmc" (Round 1 room); "default" = original 3DGS densification (untested on GPU)
     cap_max: int = 1_000_000     # mcmc only: gsplat's default; 3M collapsed to fog on a classroom (cause not yet found)
     max_gaussians: int = 6_000_000  # default only: densification stops here (web viewer limit)
@@ -77,7 +72,6 @@ class TrainConfig:
     normal_lambda: float = 0.05  # 1 - cos against prior normals, from normal_start
     normal_start: int = 3000
     appearance: bool = True      # per-image affine colour correction (exposure / white balance)
-    ppisp: bool = False          # NVIDIA PPISP instead: exposure, vignetting, colour and response curve per frame (needs the ppisp package)
     test_every: int = 24         # every Nth frame is held out for evaluation
     checkpoint_every: int = 2500
     preview_every: int = 2500
@@ -94,11 +88,11 @@ class TrainConfig:
 @dataclass
 class MeshConfig:
     voxel: float = 0.02          # metres (scene is metric after the priors stage)
-    trunc_voxels: float = 4.0
+    trunc_voxels: float = 6.0   # widened from 4.0: 12 cm band absorbs grazing-view depth disagreement (audit §7.2 C4, §7.3)
     max_depth: float = 12.0
     render_long_side: int = 960
     max_views: int = 400
-    min_alpha: float = 0.5
+    min_alpha: float = 0.3    # lowered from 0.5: includes MCMC semi-transparent fringes in fusion (audit §7.2 C5, §7.3)
     target_triangles: int = 200_000   # viewer limit is 250,000
     min_component_fraction: float = 0.002
 
@@ -127,14 +121,7 @@ class Config:
 
     def stage_hash(self, *sections):
         """Hash of the settings a stage depends on; a change re-runs that stage."""
-        data = {}
-        for section in sections:
-            values = dataclasses.asdict(getattr(self, section))
-            for (owner, key), default in LATER_DEFAULTS.items():
-                if owner == section and values.get(key) == default:
-                    del values[key]
-            data[section] = values
-        blob = json.dumps(data, sort_keys=True)
+        blob = json.dumps({s: dataclasses.asdict(getattr(self, s)) for s in sections}, sort_keys=True)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
