@@ -48,11 +48,6 @@ class PriorsConfig:
     image_long_side: int = 1920  # training images are undistorted from the original frames at this size (3840: untested)
     prior_long_side: int = 1920  # MoGe maps are stored at this size; training upsamples them
 
-    # Quality filters applied before training (drop weak frames)
-    min_points_for_training: int = 80          # drop frames with fewer SfM points
-    min_inlier_fraction: float = 0.50          # drop frames below this inlier ratio
-    max_log_scale_deviation: float = 1.0       # drop frames whose log_scale is this far from the median
-
 
 # Per-strategy values of the TrainConfig fields left at None (gsplat simple_trainer's defaults and its mcmc preset).
 STRATEGY_DEFAULTS = {"default": {"init_opacity": 0.1, "init_scale": 1.0, "opacity_reg": 0.0, "scale_reg": 0.0},

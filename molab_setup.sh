@@ -4,9 +4,6 @@
 #   bash molab_setup.sh             # install, build gsplat + MoGe, run GPU checks
 #   bash molab_setup.sh --check     # only rerun the GPU checks/report
 #   bash molab_setup.sh --rebuild   # rebuild gsplat even if a cached build exists
-#   bash molab_setup.sh --prebuilt PATH   # look for a compiled gsplat in PATH first: a folder, one of the
-#                                         # gsplat-<signature>.tar files in it, or an https:// folder URL
-#                                         # (same as NAMMA_PREBUILT_BASE=PATH)
 #
 # Everything is logged to setup-logs/<UTC time>/ and packed into
 # setup-logs/namma-setup-<UTC time>.tar.gz. Return that file when asking for help.
@@ -25,7 +22,6 @@ GSPLAT_COMMIT=512d366b67073d77ca099ede742683c165dfc23b   # main, 19 Sep 2026 (1.
 GSPLAT_DIR=/opt/namma-src/gsplat              # outside /marimo: a molab restart cannot half-restore it
 CACHE_DIR=/opt/namma-cache                    # compiled gsplat by build signature; the notebook syncs it with Drive
 # Published compiled builds: <base>/gsplat-<signature>.tar + .tar.sha256 (GitHub release assets).
-# <base> may also be a folder on this machine (or a .tar inside one); see fetch_prebuilt.
 PREBUILT_BASE="${NAMMA_PREBUILT_BASE:-https://github.com/TheCodeNotTakenT-T/namma-space/releases/download/gsplat-prebuilt}"
 PPISP_URL=https://github.com/nv-tlabs/ppisp.git
 PPISP_COMMIT=a247368047651db2e03e6f97a36e4f5bebbe5c5f    # nv-tlabs/ppisp (Apache-2.0), 23 Sep 2026: optional colour model
@@ -37,16 +33,12 @@ VENV_PY="$VENV/bin/python"
 
 MODE=full
 REBUILD=0
-while [[ $# -gt 0 ]]; do
-    case "$1" in
+for arg in "$@"; do
+    case "$arg" in
         --check) MODE=check ;;
         --rebuild) REBUILD=1 ;;
-        --prebuilt=*) PREBUILT_BASE="${1#--prebuilt=}" ;;
-        --prebuilt) [[ $# -ge 2 ]] || { echo "--prebuilt needs a path"; exit 2; }
-                    PREBUILT_BASE="$2"; shift ;;
-        *) echo "Unknown option: $1"; exit 2 ;;
+        *) echo "Unknown option: $arg"; exit 2 ;;
     esac
-    shift
 done
 
 mkdir -p "$REPO_ROOT/setup-logs"
@@ -239,41 +231,15 @@ PY
     echo "$1: compiled build saved to $archive (uploaded to Drive when you click Start)"
 }
 
-fetch_prebuilt() {  # fetch_prebuilt <file>: take a prebuilt build if one matches this exact signature
-    local tmp="$CACHE_DIR/$1.download" want base="${PREBUILT_BASE#file://}"
+fetch_prebuilt() {  # fetch_prebuilt <file>: download a published build if one matches this exact signature
+    local tmp="$CACHE_DIR/$1.download" want
     mkdir -p "$CACHE_DIR"
-    if [[ "$base" != http://* && "$base" != https://* ]]; then
-        # A folder on this machine (or one file in it). Builds are matched by name, and the name holds the
-        # signature of this toolchain + source, so a build made for something else is simply not found.
-        if [[ -f "$base" ]]; then base="$(dirname "$base")"; fi
-        if [[ ! -f "$base/$1" ]]; then
-            echo "No $1 in $base; compiling instead. (A prebuilt build must have exactly this file name.)"
-            ls "$base" 2>/dev/null | grep -E '^gsplat-.*\.tar$' | sed 's/^/  found there: /' || true
-            return 1
-        fi
-        local have
-        have="$(sha256sum "$base/$1" | cut -d' ' -f1)"
-        if [[ -f "$base/$1.sha256" ]]; then
-            want="$(cut -d' ' -f1 "$base/$1.sha256")"
-            if [[ "$have" != "$want" ]]; then
-                echo "$base/$1 failed its checksum; ignoring it."
-                return 1
-            fi
-        else
-            echo "No $1.sha256 next to it; trusting the file name."
-        fi
-        cp "$base/$1" "$tmp" || { rm -f "$tmp"; return 1; }
-        mv "$tmp" "$CACHE_DIR/$1"
-        echo "$have" > "$CACHE_DIR/$1.sha256"
-        echo "Using the prebuilt build $base/$1"
-        return 0
-    fi
-    if ! want="$(curl -fsSL --max-time 30 "$base/$1.sha256")"; then
-        echo "No published build for this signature at $base ($1); compiling instead."
+    if ! want="$(curl -fsSL --max-time 30 "$PREBUILT_BASE/$1.sha256")"; then
+        echo "No published build for this signature at $PREBUILT_BASE ($1); compiling instead."
         return 1
     fi
     echo "Downloading the published build $1"
-    curl -fsSL --retry 3 "$base/$1" -o "$tmp" || { rm -f "$tmp"; return 1; }
+    curl -fsSL --retry 3 "$PREBUILT_BASE/$1" -o "$tmp" || { rm -f "$tmp"; return 1; }
     if [[ "$(sha256sum "$tmp" | cut -d' ' -f1)" != "${want%% *}" ]]; then
         echo "Published build failed its checksum; ignoring it."
         rm -f "$tmp"
