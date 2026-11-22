@@ -1,7 +1,7 @@
 """Camera poses with pycolmap (BSD-3).
 
 GPU SIFT extraction and matching are used when the installed pycolmap reports CUDA support
-(`pycolmap.has_cuda()` is True -- true for the `pycolmap-cuda12` / `lyehe/build_gpu_colmap` wheel
+(`pycolmap.has_cuda` is True -- a boolean attribute, true for the `pycolmap-cuda12` / `lyehe/build_gpu_colmap` wheel
 installed by `molab_setup.sh`). Otherwise the CPU path is used. Set ``NAMMA_SFM_FORCE_CPU=1`` in the
 environment to force the CPU path even when CUDA is available (debugging, shared GPU, OOM).
 
@@ -51,8 +51,9 @@ def _sfm_device():
     """
     if os.environ.get("NAMMA_SFM_FORCE_CPU") == "1":
         return pycolmap.Device.cpu, False, "CPU (NAMMA_SFM_FORCE_CPU=1)"
-    has_cuda = getattr(pycolmap, "has_cuda", None)
-    if callable(has_cuda) and has_cuda():
+    # pycolmap.has_cuda is a boolean attribute set at import time (True for the pycolmap-cuda12 /
+    # lyehe/build_gpu_colmap wheel), NOT a callable -- do not call it.
+    if getattr(pycolmap, "has_cuda", False):
         return pycolmap.Device.cuda, True, "GPU (pycolmap-cuda)"
     return pycolmap.Device.cpu, False, "CPU (pycolmap without CUDA)"
 
@@ -214,4 +215,4 @@ def run(ws, cfg):
                               undistort_options=undistort, jpeg_quality=95)
     return {"mapper": mapper, **summary, **level, "candidates": {k: _summary(v, len(names)) for k, v in candidates.items()},
             "loop_detection": bool(vocab), "gpu_used": use_gpu, "device": device_label,
-            "warnings": warnings}  # outlier cameras are dropped by trainer.load_dataset
+            "warnings": warnings}  # outlier cameras are dropped by trainer.load_dataset 
