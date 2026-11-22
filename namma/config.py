@@ -42,8 +42,13 @@ class SfmConfig:
 @dataclass
 class PriorsConfig:
     enabled: bool = True
-    model: str = "Ruicheng/moge-2-vitl-normal"   # MIT code and weights
+    model: str = "Ruicheng/moge-3-vitl"        # MoGe-3: 370M, metric scale + normal (MIT).
+                                               # MoGe-2 fallback: "Ruicheng/moge-2-vitl-normal".
+                                               # namma.priors._load_moge picks the module from the name:
+                                               # "moge-3" -> moge.model.v3, else moge.model.v2.
     resolution_level: int = 9
+    refine_steps: int = 3                      # MoGe-3 only: Self-Guided Sparse 3D Refinement
+                                               # passes. 0 disables refinement (faster, less detail).
     min_points: int = 30         # sparse points needed to trust a frame's depth scale
     image_long_side: int = 1920  # training images are undistorted from the original frames at this size (3840: untested)
     prior_long_side: int = 1920  # MoGe maps are stored at this size; training upsamples them
@@ -136,6 +141,7 @@ def smoke_config():
     cfg.sfm.train_long_side = 960
     cfg.priors.image_long_side = 960
     cfg.priors.prior_long_side = 960
+    cfg.priors.refine_steps = 1   # smoke test: one refinement pass is enough to exercise the SSR path
     cfg.train.steps = 1500
     cfg.train.cap_max = 200_000
     cfg.train.max_gaussians = 200_000
@@ -147,4 +153,4 @@ def smoke_config():
     cfg.mesh.voxel = 0.04
     cfg.mesh.max_views = 60
     cfg.mesh.target_triangles = 50_000
-    return cfg
+    return cfg 

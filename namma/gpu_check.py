@@ -1,4 +1,4 @@
-"""Real GPU checks for the Namma Space environment (gsplat, MoGe-2, pycolmap-cuda12, Open3D).
+"""Real GPU checks for the Namma Space environment (gsplat, MoGe-3, pycolmap-cuda12, Open3D).
 
 Every check runs in its own subprocess (a CUDA fault in one cannot hide or
 poison the others), executes a small real CUDA operation, and records the
@@ -83,7 +83,7 @@ def check_environment():
     }
     for name in ("torch", "torchvision", "numpy", "scipy", "open3d", "opencv-python", "huggingface-hub",
                  "pycolmap", "pycolmap-cuda12", "nvidia-cuda-runtime-cu12", "cuda-toolkit",
-                 "nvidia-cuda-nvcc", "gsplat", "moge", "utils3d_moge", "av", "trimesh", "jaxtyping"):
+                 "nvidia-cuda-nvcc", "gsplat", "moge", "utils3d_moge", "flex-gemm", "av", "trimesh", "jaxtyping"):
         try:
             details["packages"][name] = md.version(name)
         except md.PackageNotFoundError:
@@ -192,15 +192,31 @@ def check_gsplat():
 
 
 def check_pipeline_imports():
-    """Everything the video pipeline imports. Whether pycolmap's GPU path works is checked in pycolmap_gpu."""
+    """Everything the video pipeline imports. Whether pycolmap's GPU path works is checked in pycolmap_gpu.
+
+    MoGe-3 lives at ``moge.model.v3`` and depends on FlexGEMM; both are checked here so a broken
+    --no-deps install fails setup (with a clear message) instead of silently degrading the priors
+    stage to 'MoGe unavailable' hours later.
+    """
     import av
-    import moge.model.v2  # noqa: F401  (MoGe-2; weights download on first use)
+    import moge.model.v3  # noqa: F401  (MoGe-3; weights download on first use)
     import pycolmap
     import trimesh  # noqa: F401
+    # FlexGEMM is new in MoGe-3 and is what breaks most often under --no-deps: the import of
+    # moge.model.v3 succeeds (pure Python), but the first model.infer() call hits a missing or
+    # ABI-mismatched flex_gemm. Fail here instead.
+    import importlib.util as _ilu
+    if not (_ilu.find_spec("flex_gemm") or _ilu.find_spec("flexgemm")):
+        raise AssertionError(
+            "FlexGEMM is not importable. MoGe-3 depends on it (JeffreyXiang/FlexGEMM). "
+            "Re-run molab_setup.sh; install_moge() should install flex-gemm with --no-deps. "
+            "If it did, the wheel's module name differs from flex_gemm/flexgemm -- check "
+            "`.venv/bin/python -c \"import importlib.metadata as m; print(m.distribution('flex-gemm').files)\"`.")
     for module in ("frames", "sfm", "priors", "trainer", "mesh", "export", "backup", "pipeline"):
         __import__(f"namma.{module}")
     return {"pycolmap": pycolmap.__version__, "pycolmap_cuda": bool(getattr(pycolmap, "has_cuda", False)),
-            "av": av.__version__, "moge": _module_file("moge")}
+            "av": av.__version__, "moge": _module_file("moge"), "moge_v3": _module_file("moge.model.v3"),
+            "flex_gemm": _module_file("flex_gemm") or _module_file("flexgemm")}
 
 
 def check_pycolmap_gpu():
@@ -349,4 +365,4 @@ def _markdown(report):
 
 
 if __name__ == "__main__":
-    run_one(sys.argv[1])
+    run_one(sys.argv[1]) 

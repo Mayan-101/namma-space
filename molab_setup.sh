@@ -36,8 +36,14 @@ PYCOLMAP_BASE=https://github.com/lyehe/build_gpu_colmap/releases/download
 PPISP_URL=https://github.com/nv-tlabs/ppisp.git
 PPISP_COMMIT=a247368047651db2e03e6f97a36e4f5bebbe5c5f    # nv-tlabs/ppisp (Apache-2.0), 23 Sep 2026: optional colour model
 PPISP_DIR=/opt/namma-src/ppisp
-MOGE_COMMIT=74fbce054ebed49800de42d0ad0e83495065719a     # microsoft/MoGe (MIT), MoGe-2 model used
-UTILS3D_COMMIT=62f09d58509485564e24d5d9f6aac9ee9ebc0c37  # pinned by MoGe's pyproject
+# MoGe: the pinned commit 74fbce0 IS the V3 release ("V3 (#158)", 19 Aug 2026) and ships
+# moge.model.v1/v2/v3 in one tree. MoGe-3 adds a flex-gemm dependency (JeffreyXiang/FlexGEMM) and
+# declares numpy>=2 in its pyproject; install_moge installs both with --no-deps to keep NumPy 1.26.4
+# (the lock pin, required by the open3d/pycolmap wheels). Runtime compatibility is verified by
+# `python -m namma check` (pipeline_imports asserts flex_gemm + moge.model.v3 import).
+MOGE_COMMIT=74fbce054ebed49800de42d0ad0e83495065719a      # microsoft/MoGe (MIT) -- the "V3 (#158)" commit; ships v1/v2/v3
+UTILS3D_COMMIT=62f09d58509485564e24d5d9f6aac9ee9ebc0c37   # unchanged: the same pin MoGe-3's pyproject asks for
+FLEXGEMM_COMMIT=b2fadb29d41846c7981ade6801ffc689fae119cf  # JeffreyXiang/FlexGEMM -- new in MoGe-3 (pip name: flex-gemm)
 VENV="${NAMMA_VENV:-$REPO_ROOT/.venv}"
 VENV_PY="$VENV/bin/python"
 
@@ -239,13 +245,19 @@ fetch_ppisp() {  # scratch copy of the pinned upstream source, like gsplat's
     git -C "$PPISP_DIR" log -1 --format='ppisp %H %cd'
 }
 
-install_moge() {  # pure Python; --no-deps keeps NumPy 1.26.4 (MoGe 3.0's pyproject asks for numpy>=2)
-    local stamp="$VENV/.namma-builds/moge" want="$MOGE_COMMIT $UTILS3D_COMMIT"
-    if [[ -f "$stamp" && "$(cat "$stamp")" == "$want" ]] && "$VENV_PY" -c "import moge.model.v2, utils3d_moge" 2>/dev/null; then
-        echo "MoGe already installed at the pinned commits."
+install_moge() {  # pure Python; --no-deps keeps NumPy 1.26.4 (MoGe-3's pyproject asks for numpy>=2)
+    # Stamps cover all three commits (moge + utils3d_moge + flex-gemm) so a pin change reinstalls.
+    local stamp="$VENV/.namma-builds/moge" want="$MOGE_COMMIT $UTILS3D_COMMIT $FLEXGEMM_COMMIT"
+    if [[ -f "$stamp" && "$(cat "$stamp")" == "$want" ]] && "$VENV_PY" -c "import moge.model.v3, utils3d_moge" 2>/dev/null \
+            && "$VENV_PY" -c "import importlib.util as u; assert u.find_spec('flex_gemm') or u.find_spec('flexgemm')" 2>/dev/null; then
+        echo "MoGe (v3) already installed at the pinned commits."
         return
     fi
-    if ! "$VENV_PY" -m pip install --no-deps --no-cache-dir --force-reinstall "moge @ git+https://github.com/microsoft/MoGe.git@$MOGE_COMMIT" "utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git@$UTILS3D_COMMIT" > "$LOG_DIR/install-moge.log" 2>&1; then
+    if ! "$VENV_PY" -m pip install --no-deps --no-cache-dir --force-reinstall \
+            "moge @ git+https://github.com/microsoft/MoGe.git@$MOGE_COMMIT" \
+            "utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git@$UTILS3D_COMMIT" \
+            "flex-gemm @ git+https://github.com/JeffreyXiang/FlexGEMM.git@$FLEXGEMM_COMMIT" \
+            > "$LOG_DIR/install-moge.log" 2>&1; then
         tail -n 30 "$LOG_DIR/install-moge.log"; echo "MoGe install failed."; exit 1
     fi
     mkdir -p "$VENV/.namma-builds"
@@ -349,4 +361,4 @@ if [[ $MODE == full ]]; then
     step extensions build_extensions
     step moge install_moge
 fi
-step gpu-checks gpu_checks
+step gpu-checks gpu_checks 
