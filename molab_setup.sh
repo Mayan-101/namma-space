@@ -17,12 +17,22 @@ cd "$REPO_ROOT"
 # ---- Pinned inputs ---------------------------------------------------------------------------
 PYTHON_VERSION=3.12
 MIN_DRIVER_CUDA=13.0                          # Torch 2.11.0+cu130 runtime
+MIN_GLIBC=2.35                                # manylinux_2_35 pycolmap wheel
 GSPLAT_URL=https://github.com/nerfstudio-project/gsplat.git
 GSPLAT_COMMIT=512d366b67073d77ca099ede742683c165dfc23b   # main, 19 Sep 2026 (1.6.0 dev; CUDA 13 support)
 GSPLAT_DIR=/opt/namma-src/gsplat              # outside /marimo: a molab restart cannot half-restore it
 CACHE_DIR=/opt/namma-cache                    # compiled gsplat by build signature; the notebook syncs it with Drive
+WHEEL_DIR=/opt/namma-wheels                   # downloaded third-party wheels; deliberately NOT in the Drive-synced cache
 # Published compiled builds: <base>/gsplat-<signature>.tar + .tar.sha256 (GitHub release assets).
 PREBUILT_BASE="${NAMMA_PREBUILT_BASE:-https://github.com/TheCodeNotTakenT-T/namma-space/releases/download/gsplat-prebuilt}"
+# pycolmap with GPU SIFT/matching: third-party build (lyehe/build_gpu_colmap, upstream COLMAP 4.2.0) with the
+# CUDA 13.0 runtime bundled in the wheel. Not in the lock file: the PyPI pycolmap-cuda12 wheel needs
+# cuda-toolkit<13, which conflicts with the cuda-toolkit==13.0.2 pin used to build gsplat.
+PYCOLMAP_TAG=v4.2.0-3
+PYCOLMAP_WHEEL='pycolmap-4.2.0+cu130.bundled-cp312-cp312-manylinux_2_35_x86_64.whl'
+PYCOLMAP_SHA256=0f455e61c167e027b1d76ee4364fcadf06a45f51691ff28ff4103c1471f8a8a3
+PYCOLMAP_VERSION='4.2.0+cu130.bundled'
+PYCOLMAP_BASE=https://github.com/lyehe/build_gpu_colmap/releases/download
 PPISP_URL=https://github.com/nv-tlabs/ppisp.git
 PPISP_COMMIT=a247368047651db2e03e6f97a36e4f5bebbe5c5f    # nv-tlabs/ppisp (Apache-2.0), 23 Sep 2026: optional colour model
 PPISP_DIR=/opt/namma-src/ppisp
@@ -75,7 +85,7 @@ step() {  # step <name> <function>: run, time and record one setup stage
 preflight() {
     [[ "$(uname -s)" == Linux ]] || { echo "Run this on the Linux GPU machine."; exit 1; }
     command -v nvidia-smi >/dev/null || { echo "nvidia-smi missing: select a GPU runtime."; exit 1; }
-    for tool in git gcc curl tar flock; do
+    for tool in git gcc curl tar flock sha256sum; do
         command -v "$tool" >/dev/null || { echo "Missing required tool: $tool"; exit 1; }
     done
     nvidia-smi | tee "$LOG_DIR/nvidia-smi.txt"
@@ -84,12 +94,40 @@ preflight() {
     if [[ "$(printf '%s\n%s\n' "$MIN_DRIVER_CUDA" "$driver_cuda" | sort -V | sed -n 1p)" != "$MIN_DRIVER_CUDA" ]]; then
         echo "Driver supports CUDA $driver_cuda; Torch cu130 needs $MIN_DRIVER_CUDA or newer."; exit 1
     fi
+    local glibc
+    glibc="$(ldd --version | sed -n 1p | grep -o '[0-9][0-9.]*$')"
+    if [[ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$glibc" | sort -V | sed -n 1p)" != "$MIN_GLIBC" ]]; then
+        echo "glibc $glibc is older than $MIN_GLIBC, which the pycolmap manylinux_2_35 wheel needs."; exit 1
+    fi
     if ! command -v uv >/dev/null; then
         python3 -m pip install --quiet uv
     fi
     { uv --version; gcc --version | sed -n 1p; ldd --version | sed -n 1p; git -C "$REPO_ROOT" rev-parse HEAD
       git -C "$REPO_ROOT" status --short; echo "cpus=$(nproc)"; free -g; df -h "$REPO_ROOT" "$HOME"; } \
         | tee "$LOG_DIR/host.txt"
+}
+
+install_pycolmap() {  # pinned third-party CUDA wheel (bundled CUDA 13 runtime), verified by checksum
+    if "$VENV_PY" -c "import importlib.metadata as m, sys; sys.exit(m.version('pycolmap') != '$PYCOLMAP_VERSION')" 2>/dev/null; then
+        echo "pycolmap $PYCOLMAP_VERSION already installed."
+        return
+    fi
+    local wheel="$WHEEL_DIR/$PYCOLMAP_WHEEL"
+    local url="$PYCOLMAP_BASE/$PYCOLMAP_TAG/${PYCOLMAP_WHEEL//+/%2B}"
+    mkdir -p "$WHEEL_DIR"
+    if [[ ! -f "$wheel" ]]; then
+        echo "Downloading $PYCOLMAP_WHEEL"
+        curl -fsSL --retry 3 "$url" -o "$wheel.part" || { rm -f "$wheel.part"; echo "pycolmap wheel download failed: $url"; exit 1; }
+        mv "$wheel.part" "$wheel"
+    fi
+    if [[ "$(sha256sum "$wheel" | cut -d' ' -f1)" != "$PYCOLMAP_SHA256" ]]; then
+        rm -f "$wheel"
+        echo "pycolmap wheel failed its SHA-256 check (expected $PYCOLMAP_SHA256); deleted it. Rerun to download again."
+        exit 1
+    fi
+    # The CPU pycolmap and PyPI pycolmap-cuda12 wheels share the pycolmap/ directory: remove them first.
+    uv pip uninstall --python "$VENV_PY" pycolmap pycolmap-cuda12 2>/dev/null || true
+    uv pip install --python "$VENV_PY" --no-deps "$wheel"
 }
 
 install_python() {
@@ -104,6 +142,7 @@ install_python() {
     fi
     [[ -x "$VENV_PY" ]] || uv venv --python "$PYTHON_VERSION" --seed "$VENV"
     uv pip install --python "$VENV_PY" --index-strategy unsafe-best-match -r env/requirements.lock.txt
+    install_pycolmap
     uv pip freeze --python "$VENV_PY" > "$LOG_DIR/pip-freeze.txt"
 }
 
@@ -206,7 +245,7 @@ install_moge() {  # pure Python; --no-deps keeps NumPy 1.26.4 (MoGe 3.0's pyproj
         echo "MoGe already installed at the pinned commits."
         return
     fi
-    if ! "$VENV_PY" -m pip install --no-deps --no-cache-dir --force-reinstall             "moge @ git+https://github.com/microsoft/MoGe.git@$MOGE_COMMIT"             "utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git@$UTILS3D_COMMIT"             > "$LOG_DIR/install-moge.log" 2>&1; then
+    if ! "$VENV_PY" -m pip install --no-deps --no-cache-dir --force-reinstall "moge @ git+https://github.com/microsoft/MoGe.git@$MOGE_COMMIT" "utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git@$UTILS3D_COMMIT" > "$LOG_DIR/install-moge.log" 2>&1; then
         tail -n 30 "$LOG_DIR/install-moge.log"; echo "MoGe install failed."; exit 1
     fi
     mkdir -p "$VENV/.namma-builds"

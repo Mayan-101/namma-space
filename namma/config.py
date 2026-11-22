@@ -56,7 +56,7 @@ STRATEGY_DEFAULTS = {"default": {"init_opacity": 0.1, "init_scale": 1.0, "opacit
 
 @dataclass
 class TrainConfig:
-    steps: int = 60_000     # raised from 30k: 20.7 dB Round 1 was under-trained (audit §7.2 C3, §7.3)
+    steps: int = 40_000     # raised from 30k: 20.7 dB Round 1 was under-trained (audit §7.2 C3, §7.3)
     strategy: str = "mcmc"       # "mcmc" (Round 1 room); "default" = original 3DGS densification (untested on GPU)
     cap_max: int = 1_000_000     # mcmc only: gsplat's default; 3M collapsed to fog on a classroom (cause not yet found)
     max_gaussians: int = 6_000_000  # default only: densification stops here (web viewer limit)
